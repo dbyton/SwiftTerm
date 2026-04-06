@@ -342,7 +342,13 @@ open class Terminal {
     public var isCurrentBufferAlternate: Bool {
         buffer === altBuffer
     }
-    
+
+    /// The vertical scroll offset of the display buffer, needed for mapping
+    /// selection coordinates (buffer-relative) to screen rows.
+    public var bufferYDisp: Int {
+        buffer.yDisp
+    }
+
     // Whether the terminal is operating in application keypad mode
     var applicationKeypad : Bool = false
     
