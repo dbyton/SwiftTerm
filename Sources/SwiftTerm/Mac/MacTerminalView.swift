@@ -165,7 +165,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     private var progressReportTimer: Timer?
     private var lastProgressValue: UInt8?
 
-    public var selection: SelectionService!
+    var selection: SelectionService!
     private var scroller: NSScroller!
     
     // Attribute dictionary, maps a console attribute (color, flags) to the corresponding dictionary
@@ -1976,12 +1976,57 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     {
         // find the selected range of text in the buffer and put in the clipboard
         let str = selection.getSelectedText()
-        
+
         let clipboard = NSPasteboard.general
         clipboard.clearContents()
         clipboard.setString(str, forType: .string)
     }
-    
+
+    /// Returns the selected text with soft-wrapped lines joined (no newline inserted
+    /// for lines where `BufferLine.isWrapped` is true). Hard newlines are preserved.
+    /// Returns nil if no selection is active.
+    open func getSelectedTextUnwrapped() -> String? {
+        guard selection.active else { return nil }
+
+        let (startPos, endPos): (Position, Position) = {
+            if Position.compare(selection.start, selection.end) == .before {
+                return (selection.start, selection.end)
+            } else {
+                return (selection.end, selection.start)
+            }
+        }()
+
+        let buf = terminal.buffer
+        let startRow = startPos.row
+        let endRow = endPos.row
+
+        guard startRow >= 0, endRow < buf.lines.count else { return nil }
+
+        var result = ""
+        var isFirstLine = true
+
+        for row in startRow...endRow {
+            let bufferLine = buf.lines[row]
+            let startCol = (row == startRow) ? startPos.col : 0
+            let endCol = (row == endRow) ? endPos.col : -1
+
+            let lineText = terminal.translateBufferLineToString(
+                buffer: buf, line: row, start: startCol, end: endCol
+            )
+
+            if isFirstLine {
+                result += lineText
+                isFirstLine = false
+            } else if bufferLine.isWrapped {
+                result += lineText
+            } else {
+                result += "\n" + lineText
+            }
+        }
+
+        return result
+    }
+
     public override func selectAll(_ sender: Any?)
     {
         selectAll ()
