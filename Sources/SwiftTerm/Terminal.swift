@@ -349,6 +349,12 @@ open class Terminal {
         buffer.yDisp
     }
 
+    /// The maximum scrollback row index in the active buffer. Hosts use this
+    /// to clamp restored viewport offsets after a reflow / output tick.
+    public var bufferYBase: Int {
+        buffer.yBase
+    }
+
     // Whether the terminal is operating in application keypad mode
     var applicationKeypad : Bool = false
     
