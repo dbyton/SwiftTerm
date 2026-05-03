@@ -100,8 +100,10 @@ extension TerminalView {
         resetCaches()
         self.cellDimension = computeFontDimensions ()
         if (frame.width > 0) && (frame.height > 0) {
-            let newCols = Int(frame.width / cellDimension.width)
-            let newRows = Int(frame.height / cellDimension.height)
+            let usableWidth = max(0, frame.width - contentInsets.left - contentInsets.right)
+            let usableHeight = max(0, frame.height - contentInsets.top - contentInsets.bottom)
+            let newCols = max(1, Int(usableWidth / cellDimension.width))
+            let newRows = max(1, Int(usableHeight / cellDimension.height))
             resize(cols: newCols, rows: newRows)
         }
         updateCaretView()
@@ -180,8 +182,10 @@ extension TerminalView {
         if newSize.width == 0 && newSize.height == 0 {
             return false
         }
-        let newRows = Int (newSize.height / cellDimension.height)
-        let newCols = Int (getEffectiveWidth (size: newSize) / cellDimension.width)
+        let usableHeight = max(0, newSize.height - contentInsets.top - contentInsets.bottom)
+        let usableWidth = max(0, getEffectiveWidth (size: newSize) - contentInsets.left - contentInsets.right)
+        let newRows = max(1, Int (usableHeight / cellDimension.height))
+        let newCols = max(1, Int (usableWidth / cellDimension.width))
         
         if newCols != terminal.cols || newRows != terminal.rows {
             selection.active = false
@@ -1194,9 +1198,13 @@ extension TerminalView {
         let firstRow = Int(contentOffset.y / cellHeight)
         let lastRow = firstRow + Int(ceil(bounds.height / cellHeight))
         #else
-        // On Mac, we are drawing the terminal buffer
+        // On Mac, we are drawing the terminal buffer.
+        // The interior (cell grid) sits at `bounds.maxY - top` down to
+        // `bounds.minY + bottom`. Anchor row math on the inset-adjusted
+        // top so dirtyRect→row conversion still hits the correct rows
+        // when contentInsets are non-zero.
         let cellHeight = cellDimension.height
-        let boundsMaxY = bounds.maxY
+        let boundsMaxY = bounds.maxY - contentInsets.top
         let firstRow = displayBuffer.yDisp+Int ((boundsMaxY-dirtyRect.maxY)/cellHeight)
         let lastRow = displayBuffer.yDisp+Int((boundsMaxY-dirtyRect.minY)/cellHeight)
         #endif
@@ -1219,7 +1227,7 @@ extension TerminalView {
             }
             let renderMode = displayBuffer.lines [row].renderMode
             let lineOffset = calcLineOffset(forRow: row)
-            let lineOrigin = CGPoint(x: 0, y: frame.height - lineOffset)
+            let lineOrigin = CGPoint(x: contentInsets.left, y: frame.height - contentInsets.top - lineOffset)
 
             switch renderMode {
             case .single:
@@ -1720,7 +1728,7 @@ extension TerminalView {
         let lineOrigin = CGPoint(x: 0, y: offset)
         #else
         let offset = (cellDimension.height * (CGFloat(buffer.y-(buffer.yDisp-buffer.yBase)+1)))
-        let lineOrigin = CGPoint(x: 0, y: frame.height - offset)
+        let lineOrigin = CGPoint(x: contentInsets.left, y: frame.height - contentInsets.top - offset)
         #endif
         caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(buffer.x)), y: lineOrigin.y)
         caretView.setText (ch: buffer.lines [vy][buffer.x])

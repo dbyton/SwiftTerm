@@ -177,6 +177,19 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
      */
     public var notifyUpdateChanges = false
 
+    /// Reserves space along each edge for chrome that overlays the terminal
+    /// without participating in the cell grid. Mirrors the macOS API; on
+    /// iOS the implementation only adjusts the cell grid count derived in
+    /// `processSizeChange` (chrome embedding is the host's responsibility).
+    public var contentInsets: UIEdgeInsets = .zero {
+        didSet {
+            guard contentInsets != oldValue else { return }
+            guard cellDimension != nil, frame.width > 0, frame.height > 0 else { return }
+            _ = processSizeChange(newSize: frame.size)
+            setNeedsDisplay()
+        }
+    }
+
     /// If true, the caret view will show different shapes depending on the focus
     /// otherwise, it will behave like it is focused
     public var caretViewTracksFocus: Bool {

@@ -125,6 +125,30 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// affects applications sending BSU/ESU directly. The default of 16ms
     /// (one frame at 60fps) is sufficient for natural I/O coalescing.
     public var syncSequenceSettleMs: Int = 16
+
+    /// Reserves space along each edge for chrome that overlays the terminal
+    /// without participating in the cell grid (composer overlays, search
+    /// bars, banners). The cell grid is sized from the *interior* rect
+    /// (`frame.size` minus these insets), drawing is offset to land inside
+    /// the interior, and hit testing is offset accordingly. The terminal's
+    /// `frame` and `bounds` are unchanged — only the usable region is.
+    /// Setting this property recomputes the cell grid and triggers a
+    /// redraw, just like a frame change. Defaults to all-zero (no inset).
+    public var contentInsets: NSEdgeInsets = .init(top: 0, left: 0, bottom: 0, right: 0) {
+        didSet {
+            guard contentInsets.top != oldValue.top
+                || contentInsets.left != oldValue.left
+                || contentInsets.bottom != oldValue.bottom
+                || contentInsets.right != oldValue.right else { return }
+            guard cellDimension != nil, frame.width > 0, frame.height > 0 else { return }
+            _ = processSizeChange(newSize: frame.size)
+            updateScrollerFrame()
+            updateProgressBarFrame()
+            updateCursorPosition()
+            needsDisplay = true
+        }
+    }
+
 #if canImport(MetalKit)
     var metalView: MTKView?
     var metalRenderer: MetalTerminalRenderer?
@@ -167,6 +191,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
 
     public var selection: SelectionService!
     private var scroller: NSScroller!
+    /// Auto-layout constraints we keep references to so `contentInsets`
+    /// changes can update them in place.
+    private var scrollerTopConstraint: NSLayoutConstraint?
+    private var scrollerBottomConstraint: NSLayoutConstraint?
+    private var scrollerTrailingConstraint: NSLayoutConstraint?
     
     // Attribute dictionary, maps a console attribute (color, flags) to the corresponding dictionary
     // of attributes for an NSAttributedString
@@ -361,7 +390,14 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     private func updateProgressBarFrame() {
         guard let progressBarView else { return }
         let height: CGFloat = 2
-        progressBarView.frame = CGRect(x: 0, y: bounds.height - height, width: bounds.width, height: height)
+        // Position the progress strip at the top of the interior rect so it
+        // doesn't draw under chrome that lives in `contentInsets.top`.
+        progressBarView.frame = CGRect(
+            x: contentInsets.left,
+            y: bounds.height - height - contentInsets.top,
+            width: max(0, bounds.width - contentInsets.left - contentInsets.right),
+            height: height
+        )
     }
 
     private func resolveProgress(for report: Terminal.ProgressReport) -> UInt8? {
@@ -527,7 +563,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
 
     func getScrollerFrame() -> CGRect {
         let scrollerWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
-        return NSRect(x: bounds.maxX - scrollerWidth, y: 0, width: scrollerWidth, height: bounds.height)
+        let interiorHeight = max(0, bounds.height - contentInsets.top - contentInsets.bottom)
+        return NSRect(x: bounds.maxX - scrollerWidth - contentInsets.right,
+                      y: contentInsets.bottom,
+                      width: scrollerWidth,
+                      height: interiorHeight)
     }
 
     func setupScroller()
@@ -539,10 +579,28 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
 
             // Use Auto Layout to position the scroller. This ensures correct layout
             // whether the parent view uses frame-based or constraint-based layout.
+            // The trailing / top / bottom constraints carry constants that
+            // mirror `contentInsets` so the scroller stays inside the
+            // interior rect when chrome insets are non-zero.
+            let trailing = scroller.trailingAnchor.constraint(
+                equalTo: trailingAnchor,
+                constant: -contentInsets.right
+            )
+            let top = scroller.topAnchor.constraint(
+                equalTo: topAnchor,
+                constant: contentInsets.top
+            )
+            let bottom = scroller.bottomAnchor.constraint(
+                equalTo: bottomAnchor,
+                constant: -contentInsets.bottom
+            )
+            scrollerTrailingConstraint = trailing
+            scrollerTopConstraint = top
+            scrollerBottomConstraint = bottom
             NSLayoutConstraint.activate([
-                scroller.trailingAnchor.constraint(equalTo: trailingAnchor),
-                scroller.topAnchor.constraint(equalTo: topAnchor),
-                scroller.bottomAnchor.constraint(equalTo: bottomAnchor),
+                trailing,
+                top,
+                bottom,
                 scroller.widthAnchor.constraint(equalToConstant: scrollerWidth)
             ])
         }
@@ -557,7 +615,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
 
     func updateScrollerFrame() {
-        // Scroller position is managed by Auto Layout constraints
+        // Scroller position is managed by Auto Layout constraints; sync the
+        // constraint constants with the current contentInsets so the
+        // scroller tracks the interior rect.
+        scrollerTrailingConstraint?.constant = -contentInsets.right
+        scrollerTopConstraint?.constant = contentInsets.top
+        scrollerBottomConstraint?.constant = -contentInsets.bottom
     }
 
     /// This method sents the `nativeForegroundColor` and `nativeBackgroundColor`
@@ -585,7 +648,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
      */
     open func getOptimalFrameSize () -> NSRect
     {
-        return NSRect (x: 0, y: 0, width: cellDimension.width * CGFloat(terminal.cols) + scrollerWidth, height: cellDimension.height * CGFloat(terminal.rows))
+        return NSRect (
+            x: 0,
+            y: 0,
+            width: cellDimension.width * CGFloat(terminal.cols) + scrollerWidth + contentInsets.left + contentInsets.right,
+            height: cellDimension.height * CGFloat(terminal.rows) + contentInsets.top + contentInsets.bottom
+        )
     }
 
     func getEffectiveWidth (size: CGSize) -> CGFloat
@@ -1739,8 +1807,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     // NSTextInputClient protocol implementation
     open func characterIndex(for point: NSPoint) -> Int {
         let local = convert(point, from: nil)
-        let col = Int(local.x / cellDimension.width)
-        let row = Int((bounds.height - local.y) / cellDimension.height)
+        let col = Int(max(0, local.x - contentInsets.left) / cellDimension.width)
+        let row = Int((bounds.height - contentInsets.top - local.y) / cellDimension.height)
         return row * terminal.cols + col
     }
     
@@ -2062,8 +2130,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             return Position (col: Int (x), row: Int (bounds.height-y))
         }
         let displayBuffer = terminal.displayBuffer
-        let col = Int (point.x / cellDimension.width)
-        let row = Int ((frame.height-point.y) / cellDimension.height)
+        let col = Int (max(0, point.x - contentInsets.left) / cellDimension.width)
+        let row = Int ((frame.height - contentInsets.top - point.y) / cellDimension.height)
         let colValue = min (max (0, col), terminal.cols-1)
         let bufferRow = row + displayBuffer.yDisp
         let maxRow = max (0, displayBuffer.lines.count - 1)
