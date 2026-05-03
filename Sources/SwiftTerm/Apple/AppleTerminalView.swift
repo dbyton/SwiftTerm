@@ -59,6 +59,23 @@ public enum LinkHighlightMode {
     case alwaysWithModifier
 }
 
+/// Controls how `contentInsets` interact with the terminal cell grid.
+///
+/// - `.shrink` (default): the cell grid shrinks to the interior rect.
+///   Chrome height changes fire `sizeChanged` → SIGWINCH to the child PTY.
+/// - `.translate`: the cell grid spans the full pane; insets only offset
+///   drawing. Chrome state changes do **not** fire `sizeChanged`, so the
+///   child PTY never sees a SIGWINCH from a chrome transition.
+public enum ContentInsetsBehavior: Equatable {
+    /// Insets shrink the cell grid (current behaviour).
+    case shrink
+    /// Insets visually offset drawing without changing the cell grid.
+    /// The agent's cols/rows reflect the full pane; rows that would draw
+    /// outside the interior are skipped. Use this when chrome state
+    /// changes should not propagate SIGWINCH to the child PTY.
+    case translate
+}
+
 /// A rendered fragment that starts at a specific column and contains a run of
 /// characters that all occupy the same number of columns.
 struct ViewLineSegment {
@@ -100,10 +117,18 @@ extension TerminalView {
         resetCaches()
         self.cellDimension = computeFontDimensions ()
         if (frame.width > 0) && (frame.height > 0) {
-            let usableWidth = max(0, frame.width - contentInsets.left - contentInsets.right)
-            let usableHeight = max(0, frame.height - contentInsets.top - contentInsets.bottom)
-            let newCols = max(1, Int(usableWidth / cellDimension.width))
-            let newRows = max(1, Int(usableHeight / cellDimension.height))
+            let newCols: Int
+            let newRows: Int
+            switch contentInsetsBehavior {
+            case .shrink:
+                let usableWidth = max(0, frame.width - contentInsets.left - contentInsets.right)
+                let usableHeight = max(0, frame.height - contentInsets.top - contentInsets.bottom)
+                newCols = max(1, Int(usableWidth / cellDimension.width))
+                newRows = max(1, Int(usableHeight / cellDimension.height))
+            case .translate:
+                newCols = max(1, Int(frame.width / cellDimension.width))
+                newRows = max(1, Int(frame.height / cellDimension.height))
+            }
             resize(cols: newCols, rows: newRows)
         }
         updateCaretView()
@@ -182,21 +207,40 @@ extension TerminalView {
         if newSize.width == 0 && newSize.height == 0 {
             return false
         }
-        let usableHeight = max(0, newSize.height - contentInsets.top - contentInsets.bottom)
-        let usableWidth = max(0, getEffectiveWidth (size: newSize) - contentInsets.left - contentInsets.right)
-        let newRows = max(1, Int (usableHeight / cellDimension.height))
-        let newCols = max(1, Int (usableWidth / cellDimension.width))
-        
+
+        let newRows: Int
+        let newCols: Int
+        switch contentInsetsBehavior {
+        case .shrink:
+            // Classic behaviour: subtract insets so the cell grid only occupies
+            // the interior rect. Any chrome height change resizes the grid,
+            // which fires sizeChanged → SIGWINCH.
+            let usableHeight = max(0, newSize.height - contentInsets.top - contentInsets.bottom)
+            let usableWidth = max(0, getEffectiveWidth(size: newSize) - contentInsets.left - contentInsets.right)
+            newRows = max(1, Int(usableHeight / cellDimension.height))
+            newCols = max(1, Int(usableWidth / cellDimension.width))
+        case .translate:
+            // Translate behaviour: the cell grid spans the full pane.
+            // Insets only shift drawing; cols/rows are computed from the raw
+            // frame size. Because the grid size is independent of inset values,
+            // chrome state changes that only alter insets do NOT change
+            // cols/rows and therefore do NOT fire sizeChanged → SIGWINCH.
+            let fullHeight = newSize.height
+            let fullWidth = getEffectiveWidth(size: newSize)
+            newRows = max(1, Int(fullHeight / cellDimension.height))
+            newCols = max(1, Int(fullWidth / cellDimension.width))
+        }
+
         if newCols != terminal.cols || newRows != terminal.rows {
             selection.active = false
             terminal.resize (cols: newCols, rows: newRows)
-            
+
             // These used to be outside
             accessibility.invalidate ()
             search.invalidate ()
-            
+
             terminalDelegate?.sizeChanged (source: self, newCols: newCols, newRows: newRows)
-           
+
             updateScroller()
             return true
         }
@@ -1199,14 +1243,30 @@ extension TerminalView {
         let lastRow = firstRow + Int(ceil(bounds.height / cellHeight))
         #else
         // On Mac, we are drawing the terminal buffer.
-        // The interior (cell grid) sits at `bounds.maxY - top` down to
-        // `bounds.minY + bottom`. Anchor row math on the inset-adjusted
-        // top so dirtyRect→row conversion still hits the correct rows
-        // when contentInsets are non-zero.
         let cellHeight = cellDimension.height
-        let boundsMaxY = bounds.maxY - contentInsets.top
-        let firstRow = displayBuffer.yDisp+Int ((boundsMaxY-dirtyRect.maxY)/cellHeight)
-        let lastRow = displayBuffer.yDisp+Int((boundsMaxY-dirtyRect.minY)/cellHeight)
+        let firstRow: Int
+        let lastRow: Int
+        switch contentInsetsBehavior {
+        case .shrink:
+            // The interior (cell grid) sits at `bounds.maxY - top` down to
+            // `bounds.minY + bottom`. Anchor row math on the inset-adjusted
+            // top so dirtyRect→row conversion still hits the correct rows
+            // when contentInsets are non-zero.
+            let boundsMaxY = bounds.maxY - contentInsets.top
+            firstRow = displayBuffer.yDisp + Int((boundsMaxY - dirtyRect.maxY) / cellHeight)
+            lastRow  = displayBuffer.yDisp + Int((boundsMaxY - dirtyRect.minY)  / cellHeight)
+        case .translate:
+            // In translate mode the cell grid spans the full pane. The bottom
+            // cell row is anchored at y = contentInsets.bottom, so the
+            // top-most visible cell row starts at:
+            //   y_top = contentInsets.bottom + (terminal.rows - 1) * cellHeight
+            // The effective "boundsMaxY" for row → coord conversion is the y
+            // coordinate of the top edge of the last (visual row 0) cell, i.e.
+            //   boundsMaxY_eff = contentInsets.bottom + terminal.rows * cellHeight
+            let boundsMaxY = contentInsets.bottom + CGFloat(terminal.rows) * cellHeight
+            firstRow = displayBuffer.yDisp + Int((boundsMaxY - dirtyRect.maxY) / cellHeight)
+            lastRow  = displayBuffer.yDisp + Int((boundsMaxY - dirtyRect.minY)  / cellHeight)
+        }
         #endif
 
         let isAltBuffer = terminal.isCurrentBufferAlternate
@@ -1227,7 +1287,32 @@ extension TerminalView {
             }
             let renderMode = displayBuffer.lines [row].renderMode
             let lineOffset = calcLineOffset(forRow: row)
+            #if os(macOS)
+            let lineOrigin: CGPoint
+            switch contentInsetsBehavior {
+            case .shrink:
+                lineOrigin = CGPoint(x: contentInsets.left, y: frame.height - contentInsets.top - lineOffset)
+            case .translate:
+                // Bottom-anchor: cell-grid row (terminal.rows-1) sits at y=contentInsets.bottom.
+                // calcLineOffset counts rows from bufferOffset upward; row 0 in buffer space
+                // (= displayBuffer.yDisp) produces the largest lineOffset, so the top-most
+                // visual row. We invert: the bottom cell row is at y = contentInsets.bottom,
+                // and each row above it steps up by cellHeight.
+                // screenRow is the 0-based display row (0 = top of visible area).
+                let screenRow = row - displayBuffer.yDisp
+                let y = contentInsets.bottom + CGFloat(terminal.rows - 1 - screenRow) * cellHeight
+                lineOrigin = CGPoint(x: contentInsets.left, y: y)
+                // Skip rows that would paint outside the visible interior.
+                if y + cellHeight > frame.height - contentInsets.top {
+                    continue   // Cell extends above interior top — skip.
+                }
+                if y < contentInsets.bottom - cellHeight {
+                    continue   // Defensive: cell is below interior bottom — skip.
+                }
+            }
+            #else
             let lineOrigin = CGPoint(x: contentInsets.left, y: frame.height - contentInsets.top - lineOffset)
+            #endif
 
             switch renderMode {
             case .single:
@@ -1727,8 +1812,17 @@ extension TerminalView {
         let offset = (cellDimension.height * (CGFloat(buffer.y+(buffer.yBase))))
         let lineOrigin = CGPoint(x: 0, y: offset)
         #else
-        let offset = (cellDimension.height * (CGFloat(buffer.y-(buffer.yDisp-buffer.yBase)+1)))
-        let lineOrigin = CGPoint(x: contentInsets.left, y: frame.height - contentInsets.top - offset)
+        let lineOrigin: CGPoint
+        switch contentInsetsBehavior {
+        case .shrink:
+            let offset = (cellDimension.height * (CGFloat(buffer.y - (buffer.yDisp - buffer.yBase) + 1)))
+            lineOrigin = CGPoint(x: contentInsets.left, y: frame.height - contentInsets.top - offset)
+        case .translate:
+            // Bottom-anchor: screenRow is the cursor's 0-based display row.
+            let screenRow = buffer.y + (buffer.yBase - buffer.yDisp)
+            let y = contentInsets.bottom + CGFloat(terminal.rows - 1 - screenRow) * cellDimension.height
+            lineOrigin = CGPoint(x: contentInsets.left, y: y)
+        }
         #endif
         caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(buffer.x)), y: lineOrigin.y)
         caretView.setText (ch: buffer.lines [vy][buffer.x])

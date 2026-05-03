@@ -177,6 +177,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
      */
     public var notifyUpdateChanges = false
 
+    /// Determines whether `contentInsets` shrink the cell grid or merely
+    /// offset drawing. Defaults to `.shrink` to preserve existing behaviour.
+    /// Mirrors the macOS API for source-level parity. On iOS the `.translate`
+    /// mode only suppresses the SIGWINCH path (no bottom-anchor drawing
+    /// override); chrome embedding is the host's responsibility.
+    public var contentInsetsBehavior: ContentInsetsBehavior = .shrink {
+        didSet {
+            guard contentInsetsBehavior != oldValue else { return }
+            guard cellDimension != nil, frame.width > 0, frame.height > 0 else { return }
+            _ = processSizeChange(newSize: frame.size)
+            setNeedsDisplay()
+        }
+    }
+
     /// Reserves space along each edge for chrome that overlays the terminal
     /// without participating in the cell grid. Mirrors the macOS API; on
     /// iOS the implementation only adjusts the cell grid count derived in

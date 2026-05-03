@@ -126,6 +126,18 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// (one frame at 60fps) is sufficient for natural I/O coalescing.
     public var syncSequenceSettleMs: Int = 16
 
+    /// Determines whether `contentInsets` shrink the cell grid or merely
+    /// offset drawing. Defaults to `.shrink` to preserve existing behaviour.
+    public var contentInsetsBehavior: ContentInsetsBehavior = .shrink {
+        didSet {
+            guard contentInsetsBehavior != oldValue else { return }
+            guard cellDimension != nil, frame.width > 0, frame.height > 0 else { return }
+            _ = processSizeChange(newSize: frame.size)
+            needsDisplay = true
+            updateCursorPosition()
+        }
+    }
+
     /// Reserves space along each edge for chrome that overlays the terminal
     /// without participating in the cell grid (composer overlays, search
     /// bars, banners). The cell grid is sized from the *interior* rect
@@ -648,11 +660,24 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
      */
     open func getOptimalFrameSize () -> NSRect
     {
+        // In .shrink mode the insets are additive (the grid occupies the interior).
+        // In .translate mode the grid already spans the full frame, so insets are
+        // not added — the optimal frame is exactly rows×cols of cells.
+        let insetWidth: CGFloat
+        let insetHeight: CGFloat
+        switch contentInsetsBehavior {
+        case .shrink:
+            insetWidth  = contentInsets.left + contentInsets.right
+            insetHeight = contentInsets.top  + contentInsets.bottom
+        case .translate:
+            insetWidth  = 0
+            insetHeight = 0
+        }
         return NSRect (
             x: 0,
             y: 0,
-            width: cellDimension.width * CGFloat(terminal.cols) + scrollerWidth + contentInsets.left + contentInsets.right,
-            height: cellDimension.height * CGFloat(terminal.rows) + contentInsets.top + contentInsets.bottom
+            width: cellDimension.width * CGFloat(terminal.cols) + scrollerWidth + insetWidth,
+            height: cellDimension.height * CGFloat(terminal.rows) + insetHeight
         )
     }
 
@@ -1808,7 +1833,15 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     open func characterIndex(for point: NSPoint) -> Int {
         let local = convert(point, from: nil)
         let col = Int(max(0, local.x - contentInsets.left) / cellDimension.width)
-        let row = Int((bounds.height - contentInsets.top - local.y) / cellDimension.height)
+        let row: Int
+        switch contentInsetsBehavior {
+        case .shrink:
+            row = Int((bounds.height - contentInsets.top - local.y) / cellDimension.height)
+        case .translate:
+            // Bottom-anchor: row 0 of the grid is at y = contentInsets.bottom + (rows-1)*cellH.
+            let rowFromBottom = Int((local.y - contentInsets.bottom) / cellDimension.height)
+            row = (terminal.rows - 1) - rowFromBottom
+        }
         return row * terminal.cols + col
     }
     
@@ -2131,7 +2164,15 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
         let displayBuffer = terminal.displayBuffer
         let col = Int (max(0, point.x - contentInsets.left) / cellDimension.width)
-        let row = Int ((frame.height - contentInsets.top - point.y) / cellDimension.height)
+        let row: Int
+        switch contentInsetsBehavior {
+        case .shrink:
+            row = Int((frame.height - contentInsets.top - point.y) / cellDimension.height)
+        case .translate:
+            // Bottom-anchor: row 0 of the grid sits at y = contentInsets.bottom + (rows-1)*cellH.
+            let rowFromBottom = Int((point.y - contentInsets.bottom) / cellDimension.height)
+            row = (terminal.rows - 1) - rowFromBottom
+        }
         let colValue = min (max (0, col), terminal.cols-1)
         let bufferRow = row + displayBuffer.yDisp
         let maxRow = max (0, displayBuffer.lines.count - 1)
