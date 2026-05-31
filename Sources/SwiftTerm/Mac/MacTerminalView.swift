@@ -571,7 +571,43 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
     }
 
-    let scrollerStyle: NSScroller.Style = .legacy
+    /// How the vertical scroller is presented. The host app sets this
+    /// per-pane so scroller visibility has a single owner (this view) rather
+    /// than being reconfigured post-hoc from the outside.
+    public enum ScrollbarVisibility: Equatable {
+        /// Always-visible legacy scroller that reserves layout width.
+        /// Default — preserves historical behavior for existing consumers.
+        case always
+        /// Overlay scroller, hidden until the pointer is over the terminal,
+        /// then faded in. Reserves no layout width beyond the legacy metric
+        /// (kept constant so toggling never reflows the cell grid).
+        case hoverOverlay
+        /// Scroller is never shown.
+        case hidden
+    }
+
+    /// Single authority for scroller presentation. Changing it restyles and
+    /// re-gates the live scroller; the host never touches the NSScroller.
+    public var scrollbarVisibility: ScrollbarVisibility = .always {
+        didSet {
+            guard oldValue != scrollbarVisibility else { return }
+            applyScrollbarVisibility()
+        }
+    }
+
+    /// Visual style of the scroller, derived from `scrollbarVisibility`.
+    /// `scrollerWidth` (the layout-reserved width) stays pinned to the legacy
+    /// metric regardless, so changing visibility never reflows the grid.
+    var scrollerStyle: NSScroller.Style {
+        switch scrollbarVisibility {
+        case .always: return .legacy
+        case .hoverOverlay, .hidden: return .overlay
+        }
+    }
+
+    private var scrollbarHoverTracking: NSTrackingArea?
+    private var wantsScrollbarHoverTracking = false
+    private let scrollbarHoverTrackingKey = "scrollbarHoverTrackingArea"
 
     func getScrollerFrame() -> CGRect {
         let scrollerWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
@@ -624,6 +660,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
         scroller.action = #selector(scrollerActivated)
         scroller.target = self
+        applyScrollbarVisibility()
     }
 
     func updateScrollerFrame() {
@@ -633,6 +670,69 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         scrollerTrailingConstraint?.constant = -contentInsets.right
         scrollerTopConstraint?.constant = contentInsets.top
         scrollerBottomConstraint?.constant = -contentInsets.bottom
+    }
+
+    /// Applies the current `scrollbarVisibility` to the live scroller — the
+    /// single place that mutates scroller style/alpha/hidden + hover tracking.
+    private func applyScrollbarVisibility() {
+        guard scroller != nil else { return }
+        scroller.scrollerStyle = scrollerStyle
+        switch scrollbarVisibility {
+        case .always:
+            wantsScrollbarHoverTracking = false
+            scroller.isHidden = false
+            scroller.alphaValue = 1
+        case .hoverOverlay:
+            wantsScrollbarHoverTracking = true
+            scroller.controlSize = .small
+            scroller.isHidden = false
+            scroller.alphaValue = 0          // revealed on hover
+        case .hidden:
+            wantsScrollbarHoverTracking = false
+            scroller.isHidden = true
+            scroller.alphaValue = 0
+        }
+        refreshScrollbarHoverTracking()
+    }
+
+    private func refreshScrollbarHoverTracking() {
+        if let existing = scrollbarHoverTracking {
+            removeTrackingArea(existing)
+            scrollbarHoverTracking = nil
+        }
+        guard wantsScrollbarHoverTracking else { return }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: [scrollbarHoverTrackingKey: true]
+        )
+        addTrackingArea(area)
+        scrollbarHoverTracking = area
+    }
+
+    private func isScrollbarHoverEvent(_ event: NSEvent) -> Bool {
+        (event.trackingArea?.userInfo?[scrollbarHoverTrackingKey] as? Bool) == true
+    }
+
+    private func revealOverlayScrollbar(_ revealed: Bool) {
+        guard scrollbarVisibility == .hoverOverlay, scroller != nil else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = revealed ? 0.15 : 0.4
+            scroller.animator().alphaValue = revealed ? 0.6 : 0
+        }
+    }
+
+    public override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        refreshScrollbarHoverTracking()
+    }
+
+    public override func mouseEntered(with event: NSEvent) {
+        if isScrollbarHoverEvent(event) {
+            revealOverlayScrollbar(true)
+        }
+        super.mouseEntered(with: event)
     }
 
     /// This method sents the `nativeForegroundColor` and `nativeBackgroundColor`
@@ -652,7 +752,10 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
         
     private var scrollerWidth: CGFloat {
-        NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
+        // Layout reserves the legacy metric in every mode so toggling
+        // `scrollbarVisibility` never changes the cell-grid width (which
+        // would resize the PTY on focus changes).
+        NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
     }
 
     /**
@@ -978,6 +1081,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
     
     public override func mouseExited(with event: NSEvent) {
+        if isScrollbarHoverEvent(event) {
+            revealOverlayScrollbar(false)
+        }
         turnOffUrlPreview()
         if linkHighlightMode == .hover || linkHighlightMode == .hoverWithModifier {
             let oldRange = linkHighlightRange
