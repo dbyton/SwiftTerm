@@ -608,6 +608,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     private var scrollbarHoverTracking: NSTrackingArea?
     private var wantsScrollbarHoverTracking = false
     private let scrollbarHoverTrackingKey = "scrollbarHoverTrackingArea"
+    private let scrollbarRevealedAlpha: CGFloat = 0.6
 
     func getScrollerFrame() -> CGRect {
         let scrollerWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
@@ -686,7 +687,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             wantsScrollbarHoverTracking = true
             scroller.controlSize = .small
             scroller.isHidden = false
-            scroller.alphaValue = 0          // revealed on hover
+            // Reveal immediately if the pointer is already inside (e.g. the
+            // pane just became active under a resting cursor); otherwise stay
+            // hidden until mouseEntered. Without this, click-to-focus would
+            // not reveal the scroller until the pointer re-entered the view.
+            scroller.alphaValue = pointerIsInsideView() ? scrollbarRevealedAlpha : 0
         case .hidden:
             wantsScrollbarHoverTracking = false
             scroller.isHidden = true
@@ -715,11 +720,20 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         (event.trackingArea?.userInfo?[scrollbarHoverTrackingKey] as? Bool) == true
     }
 
+    /// Whether the pointer currently sits within this view's bounds. Used to
+    /// seed the overlay scroller's reveal state when a pane becomes active
+    /// under an already-resting cursor (no fresh mouseEntered will fire).
+    private func pointerIsInsideView() -> Bool {
+        guard let window else { return false }
+        let viewPoint = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        return bounds.contains(viewPoint)
+    }
+
     private func revealOverlayScrollbar(_ revealed: Bool) {
         guard scrollbarVisibility == .hoverOverlay, scroller != nil else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = revealed ? 0.15 : 0.4
-            scroller.animator().alphaValue = revealed ? 0.6 : 0
+            scroller.animator().alphaValue = revealed ? scrollbarRevealedAlpha : 0
         }
     }
 
