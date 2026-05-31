@@ -2533,7 +2533,36 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
     }
     
+    /// Axis the in-flight scroll gesture is locked to, so a jittery
+    /// mid-gesture delta cannot flip routing. See `scrollRoutingDecision`.
+    private var scrollGestureAxis: ScrollRoutingAxis = .undetermined
+
     public override func scrollWheel(with event: NSEvent) {
+        let phase = event.phase
+        let momentumPhase = event.momentumPhase
+        let isGesture = phase.rawValue != 0 || momentumPhase.rawValue != 0
+        let classificationPoint = phase == .began
+            || (scrollGestureAxis == .undetermined && phase == .changed)
+        let gestureEnd = phase == .cancelled || momentumPhase == .ended
+
+        let decision = scrollRoutingDecision(
+            scrollingDeltaX: event.scrollingDeltaX,
+            scrollingDeltaY: event.scrollingDeltaY,
+            legacyDeltaY: event.deltaY,
+            isGesture: isGesture,
+            isGestureClassificationPoint: classificationPoint,
+            isGestureEnd: gestureEnd,
+            lockedAxis: scrollGestureAxis)
+        scrollGestureAxis = decision.lockedAxis
+
+        if decision.forwardUpResponderChain {
+            // The terminal grid does not consume horizontal scroll. Hand the
+            // event up the responder chain so an enclosing scroll view (e.g. a
+            // horizontal pane strip) scrolls natively, instead of dropping it.
+            super.scrollWheel(with: event)
+            return
+        }
+
         if event.deltaY == 0 {
             return
         }
