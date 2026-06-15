@@ -1835,7 +1835,27 @@ extension TerminalView {
         updateDebugDisplay()
         pendingDisplay = false
     }
-    
+
+    /// Embedder hook for a low-latency, **precise** synchronous repaint.
+    ///
+    /// `queuePendingDisplay()` schedules `updateDisplay()` ~1/60s later (and skips
+    /// it entirely during a synchronized-output frame). A host that wants the
+    /// changed rows on screen *this* runloop turn (e.g. an interactive TUI between
+    /// keystrokes) previously had to call `setNeedsDisplay(bounds)` + `display`,
+    /// because `updateDisplay()` is not `public`. That blunt full-bounds
+    /// invalidation repaints **every** row on every output frame — including the
+    /// top row, which then flickers under sustained output even though only the
+    /// bottom (e.g. an agent's status line) actually changed.
+    ///
+    /// This runs the normal update path now, so only the rows `getUpdateRange()`
+    /// reports dirty are invalidated (via `setNeedsDisplay(region)`); the caller
+    /// then forces the paint with `displayIfNeeded()`. It is a no-op mid-sync-frame
+    /// and when nothing changed, so it never tears or over-invalidates.
+    public func flushPendingDisplayRegion ()
+    {
+        updateDisplay (notifyAccessibility: false)
+    }
+
     //
     // The code below is intended to not repaint too often, which can produce flicker, for example
     // when the user refreshes the display, and this repains the screen, as dispatch delivers data
