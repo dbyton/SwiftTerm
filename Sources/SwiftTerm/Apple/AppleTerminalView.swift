@@ -1715,7 +1715,13 @@ extension TerminalView {
         terminal.clearUpdateRange ()
                 
         #if os(macOS)
-        let baseLine = frame.height
+        let baseLine: CGFloat
+        switch contentInsetsBehavior {
+        case .shrink:
+            baseLine = frame.height - contentInsets.top
+        case .translate:
+            baseLine = contentInsets.bottom + CGFloat(terminal.rows) * cellDimension.height
+        }
         var region = CGRect (x: 0,
                              y: baseLine - (cellDimension.height + CGFloat(rowEnd) * cellDimension.height),
                              width: frame.width,
