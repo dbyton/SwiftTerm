@@ -19,6 +19,41 @@ import SwiftUI
 
 let SwiftTermUnderlineStyleKey = NSAttributedString.Key("SwiftTermUnderlineStyle")
 
+/// Convert a vertical dirty-rect span into the inclusive `[firstRow, lastRow]`
+/// buffer-row range to redraw (macOS), clamped so it can never trap the
+/// `Double -> Int` conversion. AppKit hands `draw(_:)` an unbounded `dirtyRect`
+/// (`CGRectInfinite`, maxY == .greatestFiniteMagnitude) on full-view redraws and
+/// some layer-backed display passes, and can call us pre-layout with a
+/// `cellHeight <= 0`; either makes `Int((anchorMaxY - dirtyY) / cellHeight)` trap
+/// with "Double value cannot be converted to Int" — a crash observed in
+/// `drawTerminalContents`. `anchorMaxY` is the y of the top edge of visual row 0
+/// (mode-dependent). The caller's per-row loop still bounds-checks each row
+/// against the buffer, so clamping only ever narrows/widens the redraw to the
+/// visible rows. Returns `nil` when there is nothing sensible to draw.
+/// Internal (free function) so `DrawRowRangeTests` can exercise it headlessly.
+func clampedVisibleRowRange(
+    dirtyMinY: CGFloat, dirtyMaxY: CGFloat,
+    boundsMinY: CGFloat, boundsMaxY: CGFloat,
+    anchorMaxY: CGFloat, cellHeight: CGFloat, yDisp: Int
+) -> (firstRow: Int, lastRow: Int)? {
+    guard cellHeight > 0, boundsMinY.isFinite, boundsMaxY.isFinite, anchorMaxY.isFinite else {
+        return nil
+    }
+    let lo = Swift.min(boundsMinY, boundsMaxY)
+    let hi = Swift.max(boundsMinY, boundsMaxY)
+    func row(forY y: CGFloat) -> Int {
+        let clampedY: CGFloat = y.isNaN ? lo : Swift.min(Swift.max(y, lo), hi)
+        let raw = (anchorMaxY - clampedY) / cellHeight
+        // `raw` is finite here (finite numerator, cellHeight > 0); clamp to a safe
+        // Int sub-range so neither `Int(raw)` nor the later `yDisp + row` can trap.
+        let bounded = Swift.min(Swift.max(raw, CGFloat(Int.min / 2)), CGFloat(Int.max / 2))
+        return yDisp + Int(bounded)
+    }
+    // dirtyMaxY >= dirtyMinY ⇒ (anchorMaxY - dirtyMaxY) <= (anchorMaxY - dirtyMinY)
+    // ⇒ firstRow <= lastRow, so the caller's `firstRow...lastRow` is always valid.
+    return (row(forY: dirtyMaxY), row(forY: dirtyMinY))
+}
+
 #if os(iOS) || os(visionOS)
 import UIKit
 typealias TTColor = UIColor
@@ -1239,22 +1274,24 @@ extension TerminalView {
         // positions, producing garbled output. contentOffset.y is always correct because
         // the scroll view is kept in sync with yDisp (contentOffset.y == yDisp * cellHeight).
         let cellHeight = cellDimension.height
+        // Pre-layout draws can hand us a non-positive cellHeight; bail rather than
+        // trap the Double -> Int conversion below.
+        guard cellHeight > 0 else { return }
         let firstRow = Int(contentOffset.y / cellHeight)
         let lastRow = firstRow + Int(ceil(bounds.height / cellHeight))
         #else
         // On Mac, we are drawing the terminal buffer.
         let cellHeight = cellDimension.height
-        let firstRow: Int
-        let lastRow: Int
+        // `anchorMaxY` is the y of the top edge of visual row 0; it differs by
+        // contentInsets behavior.
+        let anchorMaxY: CGFloat
         switch contentInsetsBehavior {
         case .shrink:
             // The interior (cell grid) sits at `bounds.maxY - top` down to
             // `bounds.minY + bottom`. Anchor row math on the inset-adjusted
             // top so dirtyRect→row conversion still hits the correct rows
             // when contentInsets are non-zero.
-            let boundsMaxY = bounds.maxY - contentInsets.top
-            firstRow = displayBuffer.yDisp + Int((boundsMaxY - dirtyRect.maxY) / cellHeight)
-            lastRow  = displayBuffer.yDisp + Int((boundsMaxY - dirtyRect.minY)  / cellHeight)
+            anchorMaxY = bounds.maxY - contentInsets.top
         case .translate:
             // In translate mode the cell grid spans the full pane. The bottom
             // cell row is anchored at y = contentInsets.bottom, so the
@@ -1263,10 +1300,20 @@ extension TerminalView {
             // The effective "boundsMaxY" for row → coord conversion is the y
             // coordinate of the top edge of the last (visual row 0) cell, i.e.
             //   boundsMaxY_eff = contentInsets.bottom + terminal.rows * cellHeight
-            let boundsMaxY = contentInsets.bottom + CGFloat(terminal.rows) * cellHeight
-            firstRow = displayBuffer.yDisp + Int((boundsMaxY - dirtyRect.maxY) / cellHeight)
-            lastRow  = displayBuffer.yDisp + Int((boundsMaxY - dirtyRect.minY)  / cellHeight)
+            anchorMaxY = contentInsets.bottom + CGFloat(terminal.rows) * cellHeight
         }
+        // Clamp the dirtyRect → row conversion so an unbounded dirtyRect
+        // (CGRectInfinite) or a pre-layout cellHeight can never trap the
+        // Double -> Int conversion (crash: "Double value cannot be converted to
+        // Int" in drawTerminalContents).
+        guard let rowRange = clampedVisibleRowRange(
+            dirtyMinY: dirtyRect.minY, dirtyMaxY: dirtyRect.maxY,
+            boundsMinY: bounds.minY, boundsMaxY: bounds.maxY,
+            anchorMaxY: anchorMaxY, cellHeight: cellHeight,
+            yDisp: displayBuffer.yDisp
+        ) else { return }
+        let firstRow = rowRange.firstRow
+        let lastRow = rowRange.lastRow
         #endif
 
         let isAltBuffer = terminal.isCurrentBufferAlternate
